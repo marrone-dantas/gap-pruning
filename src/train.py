@@ -104,13 +104,13 @@ class TrainModel():
 
 
 
-    def train_model(self, epochs=100, weight_path='backlog', sufix='', patience=10):
+    def train_model(self, epochs=100, weight_path='backlog', sufix='', patience=5):
         self.model.to(self.device)
         self.model.train()
 
         print('Training model', self.model.__class__.__name__)
 
-        trainloader, valloader, _, _ = self.arr_dataset
+        trainloader, testloader, _ = self.arr_dataset
 
         # Initialize counters for early stopping
         epochs_since_improvement_loss = 0
@@ -137,7 +137,7 @@ class TrainModel():
 
                 progress_bar.set_description(f"Epoch {epoch+1}/{epochs} - Loss: {running_loss/total:.4f}, Acc: {train_acc/total:.4f}")
 
-            val_loss, val_acc = self.evaluate_model(valloader, generate_log=False)
+            val_loss, val_acc = self.evaluate_model(testloader, generate_log=False)
             self.hist.append([running_loss/len(trainloader), train_acc/total, val_loss, val_acc])
 
             if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):

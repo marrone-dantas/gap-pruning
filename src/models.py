@@ -23,11 +23,13 @@ def get_model(name_model,num_classes):
     if (name_model=='alexnet'):
 
         model = models.alexnet(pretrained=True)
-        model.classifier[6] = nn.Linear(4096,num_classes)
+        model.classifier[1] = nn.Linear(9216,4096)
+        model.classifier[4] = nn.Linear(4096,1024)
+        model.classifier[6] = nn.Linear(1024,num_classes)
 
     if (name_model=='vgg'):
         
-        model =  models.vgg16(pretrained=True)   
+        model =  models.vgg16(pretrained=True)  
         model.classifier[6] = nn.Linear(4096,num_classes)
         
     return model

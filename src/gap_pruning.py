@@ -2,17 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.transforms import functional as transF
-from torchvision import transforms, datasets
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import torch_pruning as tp
 import torchvision.models as models
-import torchvision
-from torchvision.models.detection import ssd
-from PIL import Image
 import os
-import copy
-import numpy as np
 
 class GapPruning:
     def __init__(self, model, dataset, batch_size=1, device='cuda'):
@@ -36,11 +30,6 @@ class GapPruning:
         def __call__(self, module, input, output):
             gap_output = self.parent.global_avg_pool(output)
             self.parent.global_gap_outputs[self.layer_name].append(gap_output.cpu().detach())
-            # Assuming self.parent.current_labels holds the labels for the current batch
-            if self.layer_name not in self.parent.feature_maps:
-                self.parent.feature_maps[self.layer_name] = {'feature_maps': [], 'labels': []}
-            self.parent.feature_maps[self.layer_name]['feature_maps'].append(output.cpu().detach())
-            self.parent.feature_maps[self.layer_name]['labels'].append(self.parent.current_labels)
 
 
     def register_hook_for_conv_layers(self):
@@ -89,28 +78,6 @@ class GapPruning:
                 
                 if samples_size is not None and count_samples >= samples_size:
                     break
-
-    def export_feature_maps(self, export_dir='feature_maps'):
-        if not os.path.exists(export_dir):
-            os.makedirs(export_dir)
-
-        # Use tqdm here for the main progress bar
-        for layer_name, data in tqdm(self.feature_maps.items(), desc="Exporting Feature Maps"):
-            layer_dir = os.path.join(export_dir, layer_name)
-            os.makedirs(layer_dir, exist_ok=True)
-
-            feature_maps_batched = data['feature_maps']
-            labels = data['labels']
-
-            for batch_idx, (feature_map, label) in enumerate(zip(feature_maps_batched, labels)):
-                avg_feature_map = torch.mean(feature_map, dim=0)
-
-                for filter_idx in range(avg_feature_map.size(0)):  # No nested tqdm, silent inner loop
-                    map_to_export = avg_feature_map[filter_idx]
-                    map_to_export = (map_to_export - map_to_export.min()) / (map_to_export.max() - map_to_export.min())
-                    img = transF.to_pil_image(map_to_export)
-                    img_path = os.path.join(layer_dir, f"batch_{batch_idx}_filter_{filter_idx}_class_{label}.png")
-                    img.save(img_path)
 
     def compute_std_devs(self, file_path='std_devs.pth', flg_load=False):
         warnings = []  # List to accumulate warnings
