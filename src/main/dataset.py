@@ -54,15 +54,19 @@ def get_loader(dataset_type, batch_size=1024, download=False):
         raise ValueError("Unsupported dataset type")
 
     # Create data loaders
-    trainloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)  # Shuffle for training
-    testloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)  # No shuffle for test
+    trainloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)  
+    testloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)  
 
     # Define class labels if applicable
     classes = None
     if dataset_type == 'cifar10':
         classes = ('Airplane', 'Car', 'Bird', 'Cat', 'Deer', 'Dog', 'Frog', 'Horse', 'Ship', 'Truck')
     elif dataset_type == 'cifar100':
-        classes = dset.CIFAR100.classes  # List of 100 class names
+        classes = ()
+    elif dataset_type == 'flowers102':
+        classes = ()
+    elif dataset_type == 'food101':
+        classes = ()
 
     return trainloader, testloader, classes
 
@@ -109,6 +113,11 @@ def get_dataset(id_dataset='cifar10', batch_size=1024, num_train=45000, num_val=
     if (id_dataset=='food101'):
         
         print('Loading FOOD101')
+        return get_loader(dataset_type=id_dataset,batch_size=batch_size, download=download)
+    
+    if (id_dataset=='flowers102'):
+        
+        print('Loading FLOWERS102')
         return get_loader(dataset_type=id_dataset,batch_size=batch_size, download=download)
     
     

@@ -7,7 +7,7 @@ import re
 directory = '/media/marronedantas/HD4TB/Projects/gap-pruning/backlog'
 
 # Optional substring filter (set to None if no filter required)
-substring_filter = 'resnet'
+substring_filter = 'alexnet_flowers102'
 
 # Human-friendly sort function
 def human_sort(files):
@@ -44,6 +44,6 @@ for file_path in file_list:
 
 # Convert results to DataFrame and save to CSV
 results_df = pd.DataFrame(results)
-results_df.to_csv('summary_metrics_resnet.csv', index=False)
+results_df.to_csv(f'{substring_filter}_summary_metrics_resnet.csv', index=False)
 
 print("Summary metrics saved to summary_metrics.csv")

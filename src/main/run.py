@@ -12,7 +12,18 @@ if __name__ == '__main__':
 
     batch_size = 2
 
-    models_arr   = ['vgg','resnet','alexnet']
+    models_arr  = [
+    "vgg16.tv_in1k",
+    "resnet50.ra_in1k",
+    "efficientnet_b0.ra_in1k",
+    "mobilenetv2_100.ra_in1k",
+    "convnext_base.fb_in1k",
+    "densenet121.ra_in1k",
+    "regnety_032.ra_in1k",
+    "repvgg_a0.rvgg_in1k",
+    "swin_tiny_patch4_window7_224.ms_in1k",
+    "mixnet_s.ft_in1k"
+    ]
     dataset_arr  = ['miniimagenet','food101','cifar10','cifar100']
     classes_arr  = [100,101,10,100]
     sample_train = [30000,60000, 45000,45000]

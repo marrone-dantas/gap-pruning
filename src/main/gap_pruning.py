@@ -105,11 +105,11 @@ class GapPruning:
 
 
     def generate_pruning_proposal(self, pruning_percentage):
+        
         for layer_name, std_dev in self.std_devs.items():
             total_filters = len(std_dev)  # Total number of filters in the layer
             # Calculate the number of filters to prune based on the percentage
-            num_filters_to_prune = int(total_filters * pruning_percentage / 100)
-
+            num_filters_to_prune = int(total_filters * pruning_percentage / 100) 
             # Ensure at least one filter remains
             num_filters_to_prune = min(num_filters_to_prune, total_filters - 1)
 
@@ -123,6 +123,63 @@ class GapPruning:
             self.pruning_proposal[layer_name] = filters_to_prune
 
 
+    def infer_pruning_from_state_dict(self, state_dict):
+        """
+        Infers pruned filters based on comparison between the original number of filters
+        (from std_devs) and the number of filters in the given pruned state_dict.
+
+        It updates self.pruning_proposal with indices of pruned filters per layer.
+        """
+        for layer_name, std_dev in self.std_devs.items():
+            total_filters = len(std_dev)  # Original number of filters
+
+            # Try to find the matching key in the state_dict
+            matching_key = None
+            for key in state_dict.keys():
+                if layer_name == key.replace('.weight','') and "weight" in key and state_dict[key].ndim == 4:
+                    matching_key = key
+                    break
+            
+            if not matching_key:
+                print(f"Warning: Layer {layer_name} not found in state_dict.")
+                continue
+
+            #print(layer_name,matching_key, len(std_dev), std_dev.shape[0] - state_dict[key].shape[0])
+
+            # Get the current filter weights
+            current_weights = state_dict[matching_key]
+            remaining_filters = current_weights.shape[0]  # Number of filters left after pruning
+
+            # Number of filters that were pruned
+            num_filters_pruned = total_filters - remaining_filters
+            num_filters_pruned = min(num_filters_pruned, total_filters - 1)
+            
+            # Sort filters by std dev (low → high)
+            sorted_indices = torch.argsort(std_dev)
+
+            # Assume the lowest std_dev filters were pruned
+            filters_pruned = sorted_indices[:num_filters_pruned].tolist()
+
+            self.pruning_proposal[layer_name] = filters_pruned
+
+    def prune_online(self):
+        
+        for layer_name, std_dev in self.std_devs.items():
+            total_filters = len(std_dev)  
+            
+            #Getting the overall 
+        
+            DG = tp.DependencyGraph().build_dependency(self.model, example_inputs=torch.randn(1, 3, 224, 224))
+        
+        
+        
+        
+            for layer_name, filters_to_prune in self.pruning_proposal.items():
+                layer = self.get_layer_by_name(layer_name)
+                if layer:
+                    pruning_plan = DG.get_pruning_plan(layer, tp.prune_conv, idxs=filters_to_prune)
+                    pruning_plan.exec()
+
     def prune(self):
         DG = tp.DependencyGraph().build_dependency(self.model, example_inputs=torch.randn(1, 3, 224, 224))
         for layer_name, filters_to_prune in self.pruning_proposal.items():
@@ -130,6 +187,52 @@ class GapPruning:
             if layer:
                 pruning_plan = DG.get_pruning_plan(layer, tp.prune_conv, idxs=filters_to_prune)
                 pruning_plan.exec()
+                
+                
+    def prune_state(self, state_dict):
+
+        flg_zero_layer = False
+
+        DG = tp.DependencyGraph().build_dependency(self.model, example_inputs=torch.randn(1, 3, 224, 224))
+        
+        for key in state_dict.keys():
+            if "weight" in key and state_dict[key].ndim == 4:
+            
+                # Getinng layer name
+                layer_name = key.replace('.weight','')
+                
+                # Getting the layers itself
+                layer = self.get_layer_by_name(layer_name)
+                
+                #Getting the original shape
+                original_shape = layer.weight.shape[0]
+                
+                #Getting the pruned shape
+                pruned_shape  = state_dict[key].shape[0]
+                
+                #Getting the std
+                std_layer = self.std_devs[layer_name]
+
+                # Number of filters that were pruned
+                num_filters_pruned = original_shape - pruned_shape
+            
+                # Sort filters by std dev (low → high)
+                
+
+                # Assume the lowest std_dev filters were pruned
+                filters_pruned = sorted_indices[:num_filters_pruned].tolist()
+                
+                # Pruning the layers
+                pruning_plan = DG.get_pruning_plan(layer, tp.prune_conv, idxs=filters_pruned)
+                pruning_plan.exec()
+                
+                # Cheking for 0 layer
+                if (layer.weight.shape[0]==0):
+                
+                    flg_zero_layer = True
+
+        return flg_zero_layer
+
 
     def get_layer_by_name(self, layer_name):
         for name, module in self.model.named_modules():
