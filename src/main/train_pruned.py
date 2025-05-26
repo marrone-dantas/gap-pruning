@@ -24,6 +24,30 @@ class TrainPrunedModel(TrainModel):
         super().__init__(is_gpu=is_gpu)
         self.scaler = GradScaler()
 
+    def get_balanced_loader(self, dataset, labels, batch_size, num_workers=0, pin_memory=False):
+        from torch.utils.data import DataLoader, Subset
+        from collections import defaultdict
+        import numpy as np
+
+        class_indices = defaultdict(list)
+        for idx, label in enumerate(labels):
+            class_indices[label].append(idx)
+
+        min_class_size = min(len(idxs) for idxs in class_indices.values())
+        balanced_indices = []
+        for idxs in class_indices.values():
+            balanced_indices.extend(np.random.choice(idxs, min_class_size, replace=False))
+        np.random.shuffle(balanced_indices)
+
+        balanced_subset = Subset(dataset, balanced_indices)
+        return DataLoader(
+            balanced_subset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory
+        )
+
     def train_pruned(
         self,
         train_loader: DataLoader,
@@ -42,6 +66,7 @@ class TrainPrunedModel(TrainModel):
         path_log: Optional[str] = None,
         prefix: str = "",
     ):
+        
         """
         Fine-tune the pruned model.
         
@@ -58,6 +83,10 @@ class TrainPrunedModel(TrainModel):
             scheduler: LR scheduler instance (optional).
             unfreeze_scheduler_step: if True, reset scheduler when unfreezing.
         """
+        
+        labels = None
+        unfreezed_conv_layers = False if freeze_conv else True
+        
         if val_loader is None:
             from sklearn.model_selection import StratifiedShuffleSplit
             from torch.utils.data import Subset
@@ -79,6 +108,7 @@ class TrainPrunedModel(TrainModel):
                 batch_size=batch_size, shuffle=True,
                 num_workers=num_workers, pin_memory=pin_memory
             )
+            
             val_loader = DataLoader(
                 Subset(ds, val_idx),
                 batch_size=batch_size, shuffle=False,
@@ -130,8 +160,13 @@ class TrainPrunedModel(TrainModel):
         history = []
 
         for epoch in range(1, epochs + 1):
+            # Recreate the balanced loader for each epoch
+            full_dataset = ds
+            train_loader = self.get_balanced_loader(full_dataset, labels, batch_size, num_workers, pin_memory)
+            
             # Unfreeze conv layers at specified epoch
-            if freeze_conv and epoch == unfreeze_after:
+            if freeze_conv and no_improve == unfreeze_after:
+                unfreezed_conv_layers = True
                 global_logger.info(f"Epoch {epoch}: unfreezing all Conv2d layers.")
                 for module in self.model.modules():
                     if isinstance(module, nn.Conv2d):
@@ -177,7 +212,7 @@ class TrainPrunedModel(TrainModel):
                     self.scheduler.step()
 
             # Validation
-            val_loss, val_acc = self.evaluate_model(val_loader, generate_log=generate_log, path_log=path_log, prefix=prefix)
+            val_loss, val_acc = self.evaluate_model(val_loader, generate_log=generate_log, path_log=path_log, prefix=f'last_{prefix}')
             history.append({
                 'epoch': epoch,
                 'train_loss': train_loss/total,
@@ -199,9 +234,103 @@ class TrainPrunedModel(TrainModel):
                 no_improve = 0
             else:
                 no_improve += 1
-                if no_improve >= 3:
-                    global_logger.info(f"No improvement in val_acc for {no_improve} epochs. Stopping early.")
-                    break
+                if (unfreezed_conv_layers): 
+                    if (no_improve-unfreeze_after) >= unfreeze_after:
+                        global_logger.info(f"No improvement in val_acc for {no_improve} epochs. Stopping early.")
+                        break
 
         global_logger.info("Fine-tuning complete.")
         return history
+    
+    def train_pruned_balanced(
+    self,
+    train_loader: DataLoader,
+    val_loader: Optional[DataLoader] = None,
+    epochs: int = 30,
+    freeze_conv: bool = True,
+    unfreeze_after: int = 5,
+    differential_lr: bool = False,
+    lr_head: float = 1e-2,
+    lr_conv: float = 1e-3,
+    weight_decay: float = 1e-4,
+    scheduler=None,
+    unfreeze_scheduler_step: bool = False,
+    pct_val: float = 0.1,
+    generate_log: bool = True,
+    path_log: Optional[str] = None,
+    prefix: str = "",
+):
+        from sklearn.model_selection import StratifiedShuffleSplit
+        from torch.utils.data import Subset
+        import numpy as np
+
+        ds = train_loader.dataset
+        labels = getattr(ds, 'targets', None) or getattr(ds, 'labels', None)
+        labels = np.array(labels)
+
+        # Stratified split if val_loader is not provided
+        if val_loader is None:
+            sss = StratifiedShuffleSplit(n_splits=1, test_size=pct_val, random_state=42)
+            train_idx, val_idx = next(sss.split(np.zeros(len(labels)), labels))
+
+            batch_size   = train_loader.batch_size
+            num_workers  = getattr(train_loader, 'num_workers', 0)
+            pin_memory   = getattr(train_loader, 'pin_memory', False)
+
+            val_loader = DataLoader(
+                Subset(ds, val_idx),
+                batch_size=batch_size, shuffle=False,
+                num_workers=num_workers, pin_memory=pin_memory
+            )
+            ds = Subset(ds, train_idx)
+            labels = labels[train_idx]
+            global_logger.info(
+                f"Created stratified split: {len(train_idx)} train / "
+                f"{len(val_idx)} val (pct_val={pct_val})"
+            )
+
+        # Balance training set by undersampling
+        from collections import defaultdict
+        class_indices = defaultdict(list)
+        for idx, label in enumerate(labels):
+            class_indices[label].append(idx)
+
+        min_class_size = min(len(idxs) for idxs in class_indices.values())
+        balanced_indices = []
+        for idxs in class_indices.values():
+            balanced_indices.extend(np.random.choice(idxs, min_class_size, replace=False))
+        np.random.shuffle(balanced_indices)
+
+        balanced_subset = Subset(ds, balanced_indices)
+
+        train_loader = DataLoader(
+            balanced_subset,
+            batch_size=train_loader.batch_size,
+            shuffle=True,
+            num_workers=getattr(train_loader, 'num_workers', 0),
+            pin_memory=getattr(train_loader, 'pin_memory', False)
+        )
+
+        # Training proceeds as in train_pruned
+        return self.train_pruned(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=epochs,
+            freeze_conv=freeze_conv,
+            unfreeze_after=unfreeze_after,
+            differential_lr=differential_lr,
+            lr_head=lr_head,
+            lr_conv=lr_conv,
+            weight_decay=weight_decay,
+            scheduler=scheduler,
+            unfreeze_scheduler_step=unfreeze_scheduler_step,
+            pct_val=pct_val,
+            generate_log=generate_log,
+            path_log=path_log,
+            prefix=prefix
+        )
+    
+
+        def additional_method(self):
+
+            pass

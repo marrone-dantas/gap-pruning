@@ -36,7 +36,7 @@ def get_loader(dataset_type, batch_size=1024, download=False):
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
-
+    
     # Load the dataset
     if dataset_type == 'cifar10':
         train_dataset = dset.CIFAR10('../datasets', train=True, download=download, transform=transform)

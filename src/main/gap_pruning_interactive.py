@@ -12,11 +12,13 @@ from sklearn.cluster import AgglomerativeClustering
 from collections import Counter
 import numpy as np
 import matplotlib.pyplot as plt
+
 import uuid # Used for unique filenames in visualization buffer
 import copy
 
 # Configure module-level logger
 global_logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 # Set logging level and format
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 
@@ -171,7 +173,8 @@ class GapPruningInteractive:
         self,
         sample_limit: Optional[int] = None,
         file_path: str = 'std_devs_of_class_means.pth',
-        load: bool = False
+        load: bool = False,
+        l1_weight: float = 0.5
     ) -> None:
         """
         Computes per-filter standard deviation of spatial statistics (mean, max, std)
@@ -199,28 +202,11 @@ class GapPruningInteractive:
                 # Ensure tensors are on the correct device if needed later
                 self.std_devs = {k: v.to(self.device) for k, v in self.std_devs.items()}
                 global_logger.info(f"Loaded std_devs from {file_path}")
-                # We also need accumulated_stats for correlation weighting if loading
-                # A more robust implementation might save/load accumulated_stats too.
-                # For now, if loading std_devs, we assume correlation weighting was
-                # already applied during the saving process or skip it.
-                # Let's recompute accumulated_stats lightly to enable weighting logic,
-                # but this is a potential area for improvement (saving accumulated_stats)
+
                 global_logger.warning("Loaded stats, but recomputing accumulated_stats for correlation weighting. Consider saving accumulated_stats for faster loading.")
-                # Quick pass to populate accumulated_stats minimally
-                # This is a workaround; better to save/load accumulated_stats
+
                 self._register_hooks()
-                # Use a very small number of samples or a dummy pass just to populate
-                # the keys in accumulated_stats if possible, or restructure
-                # _apply_correlation_weights to work directly with std_devs or load more data.
-                # A simpler approach: if loaded, skip correlation weighting here unless
-                # accumulated_stats are also loaded. Given the current structure,
-                # we need accumulated_stats for _apply_correlation_weights.
-                # Let's proceed with recomputing if loading doesn't include accumulated_stats.
-                # The current structure implies accumulated_stats is needed for weighting,
-                # which happens *after* initial std_dev computation from accumulated_stats.
-                # So, if we load std_devs, we probably shouldn't re-apply weighting based
-                # on potentially outdated or missing accumulated_stats.
-                # Let's refine: If loading, skip recomputing and weighting.
+
                 return # Exit after successful loading
 
             except Exception as e:
@@ -338,27 +324,14 @@ class GapPruningInteractive:
         # Compute the average stats per class and then the standard deviation across classes
         self.std_devs.clear()
         for layer, stats_by_class in tqdm(self.accumulated_stats.items(), desc='Computing stats per layer'):
-            stat_stds = [] # List to hold std dev for each stat type (mean, max, std)
-            # Check if we collected enough data for this layer/classes
-            # A layer might not have received 'target_per_class' samples if the loop broke early
-            # Find the actual number of samples processed for each class that reached this layer
-            # This assumes that all samples passed through all hooked layers
-            # A more robust check would be to store per-layer per-class counts.
-            # Using target_per_class as a proxy here, but be aware of potential inaccuracies
-            # if early stopping occurred and some classes/layers didn't get full data.
-            effective_samples_per_class = target_per_class # Simplification
+            stat_stds = [] 
+            effective_samples_per_class = target_per_class 
 
-            # Compute average stats per class and collect them for std deviation calculation
             per_class_mean_sum = []
             per_class_max_sum = []
             per_class_std_sum = []
             for cls in sorted(stats_by_class.keys()): # Sort to ensure consistent order
                  cls_stats = stats_by_class[cls]
-                 # Only include classes for which we processed samples
-                 # This relies on the fact that accumulated_stats only has entries for classes processed
-                 # and assumes each class processed contributed `effective_samples_per_class` samples.
-                 # If not all classes were processed up to `target_per_class` due to early stopping,
-                 # this calculation will be based on fewer samples for those classes.
                  per_class_mean_sum.append(cls_stats['mean_sum'] / effective_samples_per_class)
                  per_class_max_sum.append(cls_stats['max_sum'] / effective_samples_per_class)
                  per_class_std_sum.append(cls_stats['std_sum'] / effective_samples_per_class)
@@ -377,14 +350,24 @@ class GapPruningInteractive:
                 stacked_stds_of_stds = torch.stack(per_class_std_sum, dim=0).cpu()
                 stat_stds.append(torch.std(stacked_stds_of_stds, dim=0))
 
-            # Combine the standard deviations (e.g., by averaging) and move to device
             if stat_stds:
-                # Calculate the average standard deviation across the different stats
-                combined_std = sum(stat_stds) / len(stat_stds)
+                # Stack standard deviations into shape (3, num_filters) on CPU
+                stacked_stats = torch.stack(stat_stds, dim=0).cpu()
+
+                # Compute variance across filters for each statistic type
+                per_stat_variance = torch.var(stacked_stats, dim=1)
+
+                # Normalize to obtain weights (prevent division by zero)
+                per_stat_weights = per_stat_variance / (per_stat_variance.sum() + 1e-8)
+
+                # Apply weighted sum to combine the statistics
+                combined_std = torch.sum(stacked_stats * per_stat_weights[:, None], dim=0)
+
+                # Store result for this layer
                 self.std_devs[layer] = combined_std.to(self.device)
             else:
-                 global_logger.warning(f"No stats computed for layer {layer}. Skipping.")
-                 self.std_devs[layer] = torch.zeros(self.get_layer_by_name(layer).out_channels).to(self.device) # Add a zero tensor as placeholder
+                global_logger.warning(f"No stats computed for layer {layer}. Skipping.")
+                self.std_devs[layer] = torch.zeros(self.get_layer_by_name(layer).out_channels).to(self.device)
 
         # Apply clustering weights to adjust std_devs based on filter correlation
         if self.accumulated_stats and target_per_class > 0: # Ensure we have data and samples were processed
@@ -401,6 +384,30 @@ class GapPruningInteractive:
             global_logger.info(f"Saved std_devs to {file_path}")
         except Exception as e:
             global_logger.warning(f"Failed to save stats to {file_path}: {e}")
+        '''
+        # Adding L1 Score
+        for layer_name, std_tensor in self.std_devs.items():
+            conv_layer = self.get_layer_by_name(layer_name)
+            weights = conv_layer.weight.data
+
+            n_filters = weights.shape[0]
+            l1_norm = torch.norm(weights.view(n_filters, -1), p=1, dim=1).to(self.device)
+
+            # Normalização (inversamente proporcional: menor = mais propenso a pruning)
+            std_score = (std_tensor - std_tensor.min()) / (std_tensor.max() - std_tensor.min() + 1e-8)
+            l1_score = (l1_norm - l1_norm.min()) / (l1_norm.max() - l1_norm.min() + 1e-8)
+
+            # Inverter a escala para que MENOR valor = MENOR importância
+            inverted_std_score = 1.0 - std_score
+            inverted_l1_score = 1.0 - l1_score
+
+            # Combinação ponderada
+            combined_score = l1_weight * inverted_std_score + (1 - l1_weight) * inverted_l1_score
+
+            # Substituir no std_devs como métrica final para ranqueamento
+            self.std_devs[layer_name] = combined_score
+            
+        '''
 
     def _apply_correlation_weights(self, samples_per_class: int) -> None:
         """
@@ -540,19 +547,6 @@ class GapPruningInteractive:
 
         total_params = sum(param_counts.values()) or 1 # Prevent division by zero
 
-        # Determine the scaling factor 'beta'.
-        # The goal is to find beta such that the sum of (layer_rate * layer_params)
-        # over all layers equals (global_prune_rate * total_params).
-        # Layer rate `rate_i` is initially proposed as `(1 - importance_i) * beta`.
-        # We solve for beta:
-        # sum_i [ (1 - importance_i) * beta * param_count_i ] = global_prune_rate * total_params
-        # beta * sum_i [ (1 - importance_i) * param_count_i ] = global_prune_rate * total_params
-        # beta = (global_prune_rate * total_params) / sum_i [ (1 - importance_i) * param_count_i ]
-        # To make it less sensitive to total_params scale, we can divide both numerator and denominator by total_params:
-        # beta = global_prune_rate / sum_i [ (1 - importance_i) * (param_count_i / total_params) ]
-        # Let `param_proportion_i = param_count_i / total_params`
-        # beta = global_prune_rate / sum_i [ (1 - importance_i) * param_proportion_i ]
-
         # Calculate the weighted sum in the denominator: sum_i [ (1 - importance_i) * param_proportion_i ]
         weighted_sum_denominator = sum(
             (1.0 - importance.get(l, 0.0)) * (param_counts.get(l, 0) / total_params)
@@ -639,7 +633,65 @@ class GapPruningInteractive:
 
         return similarity_map
 
-    def prune_online(
+    def alternative_pruning(self, strategy='L1', ratio=0.05):
+    
+        strategy_method = None
+    
+        if (strategy == 'L1'):
+            # Use L1 strategy
+            strategy_method = tp.strategy.L1Strategy()
+    
+        elif (strategy == 'L2'):
+
+            strategy_method = tp.strategy.L2Strategy()
+        
+        elif (strategy == 'Random'):
+
+            strategy_method = tp.strategy.RandomStrategy()
+        
+        # Generate graph dependecy
+        DG = tp.DependencyGraph()
+        DG.build_dependency(self.model, example_inputs=torch.randn(1,3,224,224))
+
+        full_pruned_data = {} # Alias for clarity
+        pruned_data = {} # Alias for clarity
+
+        # Iterate through layers that have computed standard deviations
+        for layer_name, std in tqdm(self.std_devs.items(), desc='Pruning layers'):
+            layer = self.get_layer_by_name(layer_name)
+            # Check if the layer exists and is a Conv2d layer (prunable type)
+            if layer is None or not isinstance(layer, nn.Conv2d):
+                global_logger.warning(f"Layer '{layer_name}' not found or not a Conv2d layer. Skipping pruning.")
+            else:
+                original_out_channels = layer.weight.size(0)
+                
+                DG = tp.DependencyGraph()
+                DG.build_dependency(self.model, example_inputs=torch.randn(1,3,224,224))
+                
+                try:
+                    pruning_idxs_full = strategy_method(layer.weight, amount=1)
+                    full_pruned_data[layer_name] = copy.deepcopy(pruning_idxs_full)
+                    
+                    
+                    pruning_idxs = strategy_method(layer.weight, amount=ratio)
+                    pruned_data[layer_name]      = copy.deepcopy(pruning_idxs)
+                    
+                    plan = DG.get_pruning_plan(layer, tp.prune_conv, idxs=pruning_idxs)
+                    plan.exec()
+                    global_logger.info(
+                        f"Pruned {len(pruning_idxs)}/{original_out_channels} filters "
+                        f"from layer {layer_name} (rate: {ratio:.4f})."
+                    )
+                    
+                except Exception as e:
+                    global_logger.error(f"Error executing pruning plan for layer {layer_name}: {e}. Skipping this layer.")
+
+                    continue
+    
+    
+        return pruned_data, full_pruned_data
+
+    def  prune_online(
         self,
         global_prune_rate: float = 0.5,
         example_input_size: Tuple[int, ...] = (1, 3, 224, 224)
@@ -670,6 +722,9 @@ class GapPruningInteractive:
             RuntimeError: If `compute_stats_on_the_fly()` has not been called
                           and `self.std_devs` is empty.
         """
+        
+        
+        
         # Ensure statistics have been computed
         if not self.std_devs:
             raise RuntimeError(
@@ -844,6 +899,137 @@ class GapPruningInteractive:
         
 
         return pruning_report_df, pruned_data, full_pruned_data
+
+
+    def global_pruning(
+        self,
+        global_prune_rate: float = 0.5,
+        example_input_size: Tuple[int, ...] = (1, 3, 224, 224)
+    ) -> Tuple[pd.DataFrame, Dict[str, List[int]]]:
+        """
+        Performs global channel pruning by ranking **all** filters in the network
+        by their std-dev and removing the lowest‐variance ones until
+        global_prune_rate * total_filters have been pruned.
+
+        Returns:
+            - pruning_report_df: DataFrame with columns ['layer','original','pruned','remaining']
+            - pruned_data: dict mapping layer_name -> list of pruned filter indices
+        """
+        def normalize_to_unit(tensor: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+            """
+            Normaliza os valores de `tensor` para o intervalo [0, 1].
+
+            Args:
+                tensor: Tensor qualquer.
+                eps: Pequeno valor para evitar divisão por zero se max == min.
+
+            Returns:
+                Tensor normalizado em [0,1].
+            """
+            min_val = tensor.min()
+            max_val = tensor.max()
+            return (tensor - min_val) / (max_val - min_val + eps)
+        
+        if not self.std_devs:
+            raise RuntimeError(
+                "No statistics found. Run compute_stats_on_the_fly() first."
+            )
+
+        global_logger.info(f"Starting GLOBAL pruning at {global_prune_rate:.2%} target...")
+        total_before = sum(p.numel() for p in self.model.parameters())
+
+        # 1) Build dependency graph on CPU
+        original_device = next(self.model.parameters()).device
+        self.model.to('cpu')
+        dummy = torch.randn(*example_input_size)
+        DG = tp.DependencyGraph().build_dependency(self.model, example_inputs=dummy)
+        self.model.to(original_device)
+
+        # 2) Flatten all filters into one list: (layer_name, filter_idx, std_val)
+        all_filters: List[Tuple[str,int,float]] = []
+        for layer_name, std in self.std_devs.items():
+            std_norm = normalize_to_unit(std)
+            # skip empty or non-Conv layers
+            if std.numel() == 0:
+                continue
+            for idx, val in enumerate(std_norm.tolist()):
+                all_filters.append((layer_name, idx, val))
+
+        total_filters = len(all_filters)
+        num_to_prune   = int(global_prune_rate * total_filters)
+        global_logger.info(f"Total filters = {total_filters}, pruning {num_to_prune} filters.")
+
+        if num_to_prune <= 0:
+            global_logger.info("Nothing to prune at this rate.")
+            return pd.DataFrame(columns=['layer','original','pruned','remaining']), {}
+
+        # 3) Sort globally and pick the lowest‐std filters
+        all_filters.sort(key=lambda x: x[2])  # ascending std
+        to_prune = all_filters[:num_to_prune]
+
+        # 4) Group by layer
+        pruned_data: Dict[str,List[int]] = {}
+        for layer_name, idx, _ in to_prune:
+            pruned_data.setdefault(layer_name, []).append(idx)
+
+        # 5) Apply pruning per layer
+        report = []
+        self.pruning_proposal = {}
+        for layer_name, idxs in tqdm(pruned_data.items(), desc="Global pruning"):
+            layer = self.get_layer_by_name(layer_name)
+            if layer is None or not isinstance(layer, torch.nn.Conv2d):
+                global_logger.warning(f"Skipping {layer_name}: not a Conv2d.")
+                continue
+
+            original_out = layer.weight.size(0)
+            # make sure we never try to prune all filters
+            idxs = [i for i in sorted(set(idxs)) if i < original_out]
+            idxs = idxs[: max(0, original_out - 1)]  
+
+            if not idxs:
+                report.append({
+                    'layer': layer_name,
+                    'original': original_out,
+                    'pruned': 0,
+                    'remaining': original_out
+                })
+                continue
+
+            # execute prune
+            try:
+                plan = DG.get_pruning_plan(layer, tp.prune_conv, idxs=idxs)
+                plan.exec()
+                self.pruning_proposal[layer_name] = copy.deepcopy(idxs)
+                pruned_count = len(idxs)
+                remaining = layer.weight.size(0)
+                report.append({
+                    'layer': layer_name,
+                    'original': original_out,
+                    'pruned': pruned_count,
+                    'remaining': remaining
+                })
+                global_logger.info(
+                    f"Pruned {pruned_count}/{original_out} from {layer_name}"
+                )
+            except Exception as e:
+                global_logger.error(f"Failed to prune {layer_name}: {e}")
+                report.append({
+                    'layer': layer_name,
+                    'original': original_out,
+                    'pruned': 0,
+                    'remaining': original_out
+                })
+
+        # 6) Summary DataFrame
+        pruning_report_df = pd.DataFrame(report)
+
+        total_after  = sum(p.numel() for p in self.model.parameters())
+        global_logger.info(
+            f"Params before: {total_before}, after: {total_after}, "
+            f"pruned {(total_before-total_after)} ({(total_before-total_after)/total_before:.2%})"
+        )
+
+        return pruning_report_df, pruned_data
 
     def visualize_gradients_pruned_vs_kept(
         self,

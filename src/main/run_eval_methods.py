@@ -33,21 +33,17 @@ if __name__ == '__main__':
     models_arr   = [
     "resnet50.ra_in1k"
     ]
-    '''dataset_arr  = ['cifar10','cifar100', 'flowers102', 'food101']
-    classes_arr  = [10,100, 102, 101]
-    pruning_rates = [.05,.1,.15,.2,.25,.3,.35,.4,.45,.5]
-    '''
     dataset_arr  = ['cifar10']
     classes_arr  = [10]
-    pruning_rates = [0.3]#.1,.15,.2,.25,.3,.35]
+    pruning_rates = [.05, .1, .15, .2, .25, .3, .35]
 
     dict_list_of_layers_to_visualize = {"resnet50.ra_in1k":['layer1.0.conv1', 'layer2.0.conv1', 'layer3.0.conv1', 'layer4.0.conv1']}
-    epochs = 100
+    epochs = 50
     sample_viz = 5
-    skip_initial_eval = True
+    skip_initial_eval = False
     base_model_paths = '/media/marronedantas/HD4TB/Projects/gap-pruning/checkpoints/base_trained_models'
-    base_pruned_model_paths = '/media/marronedantas/HD4TB/Projects/gap-pruning/checkpoints/base_prunned_models'
-    buffer_path = '/media/marronedantas/HD4TB/Projects/gap-pruning/buffers'
+    base_pruned_model_paths = '/media/marronedantas/HD4TB/Projects/gap-pruning/checkpoints/base_prunned_models_alternative'
+    buffer_path = '/media/marronedantas/HD4TB/Projects/gap-pruning/buffer_alternative'
 
     for model_name in models_arr:
         for dataset_name, num_classes in zip(dataset_arr, classes_arr):
@@ -96,26 +92,27 @@ if __name__ == '__main__':
             
             base_model = copy.deepcopy(dummy_train.model)
             
+            base_model = copy.deepcopy(dummy_train.model)
+            
             for pruning_rate in pruning_rates:
 
                 gap_pruning = GapPruning(model=copy.deepcopy(base_model), dataset=dummy_train.arr_dataset[0], device='cuda')
                 gap_pruning.model = gap_pruning.model.to('cuda')
                 
                 # Compute the activations
-                global_logger.info(f"->Starting computing metrics!")
-                # Compute the activations
-                gap_pruning.compute_stats_on_the_fly(sample_limit=1000, 
+                gap_pruning.compute_stats_on_the_fly(sample_limit=5, 
                                                      load=True,
-                                                     file_path=f"stats_{model_name}_{dataset_name}.pt",
-                                                     l1_weight=0.5)
+                                                     file_path=f"stats_{model_name}_{dataset_name}.pt",)
 
                 # Pruning process
-                pruned_report, pruned_data, full_pruned_data = gap_pruning.prune_online(global_prune_rate=pruning_rate)
-                
+                gap_pruning.model = gap_pruning.model.to('cpu')
+                pruned_data, full_pruned_data = gap_pruning.alternative_pruning(strategy='L1', ratio=pruning_rate)
+
                 # Forcing the hooks to be removed
                 gap_pruning._remove_hooks()
                 
                 # Lets check if is a valid model
+                gap_pruning.model = gap_pruning.model.to('cuda')
                 is_valid_rate  = get_last_layer_output(gap_pruning.model, torch.randn(1, 3, 224, 224).to('cuda'))
 
                 if not is_valid_rate:
@@ -133,10 +130,10 @@ if __name__ == '__main__':
                 export_viz_pre_pruning(gap_pruning, model_name, dataset_name, pruning_rate,
                                        sample_viz, buffer_path, list_of_layers_to_visualize, pruned_data,
                                        full_pruned_data)
-                
+                    
                 # Finetune pruned model
                 trainer = TrainPrunedModel(is_gpu=True)
-                                                                                                                                                                            
+                
                 # Setting parameters
                 trainer.model = copy.deepcopy(pruned_model)
                 trainer.optimizer = optim.SGD(trainer.model.parameters(),lr=0.001, momentum=0.9)
@@ -191,5 +188,3 @@ if __name__ == '__main__':
                                                      least_and_most=True,
                                                      least_and_most_samples=sample_viz,
                                                      after_pruning=True)
-
-                    
